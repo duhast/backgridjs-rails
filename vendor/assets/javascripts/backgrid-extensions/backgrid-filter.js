@@ -5,31 +5,25 @@
   Copyright (c) 2013 Jimmy Yuen Ho Wong and contributors
   Licensed under the MIT @license.
 */
-(function (factory) {
+(function (root, factory) {
 
   // CommonJS
   if (typeof exports == "object") {
-
-    var lunr;
-
-    try {
-      lunr = require("lunr");
-    }
-    catch (err) {}
-
-    module.exports = factory(require("underscore"),
-                             require("backbone"),
-                             require("backgrid"),
-                             lunr);
+    (function () {
+      var lunr;
+      try { lunr = require("lunr"); } catch (e) {}
+      module.exports = factory(require("underscore"),
+                               require("backbone"),
+                               require("backgrid"),
+                               lunr);
+    }());
   }
   // Browser
-  else if (typeof _ !== "underscore" &&
-           typeof Backbone !== "undefined" &&
-           typeof Backgrid !== "undefined") {
-    factory(_, Backbone, Backgrid, window.lunr);
+  else {
+    factory(root._, root.Backbone, root.Backgrid, root.lunr);
   }
 
-}(function (_, Backbone, Backgrid, lunr) {
+}(this, function (_, Backbone, Backgrid, lunr) {
 
   "use strict";
 
@@ -48,17 +42,20 @@
     className: "backgrid-filter form-search",
 
     /** @property {function(Object, ?Object=): string} template */
-    template: _.template('<span class="search">&nbsp;</span><input type="search" <% if (placeholder) { %> placeholder="<%- placeholder %>" <% } %> name="<%- name %>" /><a class="clear" href="#">&times;</a>'),
+    template: _.template('<span class="search">&nbsp;</span><input type="search" <% if (placeholder) { %> placeholder="<%- placeholder %>" <% } %> name="<%- name %>" <% if (value) { %> value="<%- value %>" <% } %>/><a class="clear" data-backgrid-action="clear" href="#">&times;</a>', null, {variable: null}),
 
     /** @property */
     events: {
       "keyup input[type=search]": "showClearButtonMaybe",
-      "click .clear": "clear",
+      "click a[data-backgrid-action=clear]": "clear",
       "submit": "search"
     },
 
     /** @property {string} [name='q'] Query key */
     name: "q",
+
+    /** @property {string} [value] The search box value.  */
+    value: null,
 
     /**
        @property {string} [placeholder] The HTML5 placeholder to appear beneath
@@ -70,12 +67,16 @@
        @param {Object} options
        @param {Backbone.Collection} options.collection
        @param {string} [options.name]
+       @param {string} [options.value]
        @param {string} [options.placeholder]
+       @param {function(Object): string} [options.template]
     */
     initialize: function (options) {
       ServerSideFilter.__super__.initialize.apply(this, arguments);
       this.name = options.name || this.name;
+      this.value = options.value || this.value;
       this.placeholder = options.placeholder || this.placeholder;
+      this.template = options.template || this.template;
 
       // Persist the query on pagination
       var collection = this.collection, self = this;
@@ -86,6 +87,15 @@
           return self.searchBox().val() || null;
         };
       }
+    },
+
+    /**
+       Event handler. Clear the search box and reset the internal search value.
+     */
+    clearSearchBox: function() {
+      this.value = null;
+      this.searchBox().val(null);
+      this.showClearButtonMaybe();
     },
 
     /**
@@ -110,43 +120,62 @@
        Returns the clear button.
      */
     clearButton: function () {
-      return this.$el.find(".clear");
+      return this.$el.find("a[data-backgrid-action=clear]");
+    },
+
+
+    /**
+       Returns the current search query.
+     */
+    query: function() {
+      this.value = this.searchBox().val();
+      return this.value;
     },
 
     /**
        Upon search form submission, this event handler constructs a query
        parameter object and pass it to Collection#fetch for server-side
        filtering.
+
+       If the collection is a PageableCollection, searching will go back to the
+       first page.
     */
     search: function (e) {
       if (e) e.preventDefault();
 
       var data = {};
+      var query = this.query();
+      if (query) data[this.name] = query;
+
+      var collection = this.collection;
 
       // go back to the first page on search
-      var collection = this.collection;
       if (Backbone.PageableCollection &&
-          collection instanceof Backbone.PageableCollection &&
-          collection.mode == "server") {
-        collection.state.currentPage = collection.state.firstPage;
+          collection instanceof Backbone.PageableCollection) {
+        collection.getFirstPage({data: data, reset: true, fetch: true});
       }
-      else {
-        var query = this.searchBox().val();
-        if (query) data[this.name] = query;
-      }
-
-      collection.fetch({data: data, reset: true});
+      else collection.fetch({data: data, reset: true});
     },
 
     /**
        Event handler for the clear button. Clears the search box and refetch the
        collection.
+
+       If the collection is a PageableCollection, clearing will go back to the
+       first page.
     */
     clear: function (e) {
       if (e) e.preventDefault();
-      this.searchBox().val(null);
-      this.showClearButtonMaybe();
-      this.collection.fetch({reset: true});
+      this.clearSearchBox();
+
+      var collection = this.collection;
+
+      // go back to the first page on clear
+      if (Backbone.PageableCollection &&
+          collection instanceof Backbone.PageableCollection) {
+        collection.getFirstPage({reset: true, fetch: true});
+      }
+      else collection.fetch({reset: true});
     },
 
     /**
@@ -178,7 +207,7 @@
 
     /** @property */
     events: _.extend({}, ServerSideFilter.prototype.events, {
-      "click .clear": function (e) {
+      "click a[data-backgrid-action=clear]": function (e) {
         e.preventDefault();
         this.clear();
       },
@@ -235,8 +264,7 @@
       });
       this.listenTo(collection, "reset", function (col, options) {
         options = _.extend({reindex: true}, options || {});
-        if (options.reindex && col === collection &&
-            options.from == null && options.to == null) {
+        if (options.reindex && options.from == null && options.to == null) {
           shadowCollection.reset(col.models);
         }
       });
@@ -310,20 +338,28 @@
        Takes the query from the search box, constructs a matcher with it and
        loops through collection looking for matches. Reset the given collection
        when all the matches have been found.
+
+       If the collection is a PageableCollection, searching will go back to the
+       first page.
     */
     search: function () {
-      var matcher = _.bind(this.makeMatcher(this.searchBox().val()), this);
+      var matcher = _.bind(this.makeMatcher(this.query()), this);
       var col = this.collection;
       if (col.pageableCollection) col.pageableCollection.getFirstPage({silent: true});
-      this.collection.reset(this.shadowCollection.filter(matcher), {reindex: false});
+      col.reset(this.shadowCollection.filter(matcher), {reindex: false});
     },
 
     /**
        Clears the search box and reset the collection to its original.
+
+       If the collection is a PageableCollection, clearing will go back to the
+       first page.
     */
     clear: function () {
-      this.searchBox().val(null);
-      this.collection.reset(this.shadowCollection.models, {reindex: false});
+      this.clearSearchBox();
+      var col = this.collection;
+      if (col.pageableCollection) col.pageableCollection.getFirstPage({silent: true});
+      col.reset(this.shadowCollection.models, {reindex: false});
     }
 
   });
@@ -445,15 +481,24 @@
        the client-side. The search result is returned by resetting the
        underlying collection to the models after interrogating the index for the
        query answer.
+
+       If the collection is a PageableCollection, searching will go back to the
+       first page.
     */
     search: function () {
-      var searchResults = this.index.search(this.searchBox().val());
+      var col = this.collection;
+      if (!this.query()) {
+        col.reset(this.shadowCollection.models, {reindex: false});
+        return;
+      }
+
+      var searchResults = this.index.search(this.query());
       var models = [];
       for (var i = 0; i < searchResults.length; i++) {
         var result = searchResults[i];
         models.push(this.shadowCollection.get(result.ref));
       }
-      var col = this.collection;
+
       if (col.pageableCollection) col.pageableCollection.getFirstPage({silent: true});
       col.reset(models, {reindex: false});
     }
